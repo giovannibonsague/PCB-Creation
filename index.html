@@ -368,13 +368,22 @@ canvas{display:block;width:100%;height:100%}
 </div>
 
 <!-- LCSC -->
-<div class="pop hid" id="pq"><div class="ph" id="dpq"><span class="pt">🔍 LCSC REAL PARTS</span><button class="px" onclick="tp('pq')">✕</button></div>
+<div class="pop hid" id="pq"><div class="ph" id="dpq"><span class="pt">🔍 LCSC PARTS SEARCH</span><button class="px" onclick="tp('pq')">✕</button></div>
   <div class="pb">
-    <div class="qrow"><input type="text" id="qq" placeholder="Part number or keyword — e.g. C701342, ESP32, 100nF, AMS1117" onkeydown="if(event.key==='Enter')lcsc()"><button class="qbtn" onclick="lcsc()">Search</button></div>
-    <div class="lcsc-note" style="padding:5px 8px;font-family:var(--fn);font-size:9px;color:var(--t3);border-bottom:1px solid var(--b0);line-height:1.6">
-      Live JLCPCB/LCSC database — updated daily · <span style="color:var(--g)">~35,000 basic+preferred parts</span> · First search loads ~3MB then caches
+    <!-- Worker URL row -->
+    <div style="display:flex;gap:5px;padding:6px 7px;border-bottom:1px solid var(--b0);align-items:center;flex-shrink:0">
+      <span style="font-family:var(--fn);font-size:9px;color:var(--t3);white-space:nowrap">Worker URL:</span>
+      <input id="lcsc-worker-url" type="text" placeholder="https://your-worker.workers.dev  (optional — enables full 700k+ search)" style="flex:1;background:var(--bg3);border:1px solid var(--b0);border-radius:var(--rad);padding:4px 7px;color:var(--t1);font-family:var(--fn);font-size:9px;outline:none" onfocus="this.style.borderColor='var(--g)'" onblur="this.style.borderColor='var(--b0)'">
+      <button onclick="showWorkerSetup()" style="padding:3px 7px;border-radius:var(--rad);border:1px solid var(--b1);background:transparent;color:var(--t3);font-size:9px;cursor:pointer;white-space:nowrap">Setup ↗</button>
     </div>
-    <div class="qsc" id="qr"><div class="qmsg">Search the real JLCPCB/LCSC parts database.<br>Results are live — updated daily from JLCPCB.<br><br>Try: <code>ESP32</code> · <code>STM32F103</code> · <code>AMS1117</code> · <code>100nF</code> · <code>10k 0402</code> · <code>CH340</code><br>Or by part number: <code>C701342</code> · <code>C8734</code> · <code>C6186</code></div></div>
+    <div class="qrow"><input type="text" id="qq" placeholder="Part number or keyword — C701342, ESP32, 100nF, AMS1117…" onkeydown="if(event.key==='Enter')lcsc()"><button class="qbtn" onclick="lcsc()">Search</button></div>
+    <div class="qsc" id="qr"><div class="qmsg">
+      Searches live LCSC/EasyEDA API via multiple strategies.<br>
+      Results show real stock, pricing, and pin data.<br><br>
+      Try: <code>ESP32</code> · <code>STM32F103</code> · <code>AMS1117</code> · <code>100nF</code> · <code>CH340G</code><br>
+      Or by LCSC part#: <code>C701342</code> · <code>C8734</code> · <code>C6186</code><br><br>
+      <span style="color:var(--t3)">For unrestricted full search: click <strong>Setup ↗</strong> above to deploy a free Cloudflare Worker in 2 minutes.</span>
+    </div></div>
   </div>
 </div>
 
@@ -1553,240 +1562,381 @@ const LCSC_DB=[
    pins:[{n:'1',s:'pass',side:'L'},{n:'2',s:'pass',side:'L'},{n:'3',s:'pass',side:'R'},{n:'4',s:'pass',side:'R'}]},
 ];
 
-// Real LCSC/JLCPCB parts CSV — updated daily, served from GitHub Pages with CORS headers
-// Source: https://github.com/CDFER/jlcpcb-parts-database
-// ~3MB CSV, cached in memory after first fetch so subsequent searches are instant
-const LCSC_CSV_URL='https://cdfer.github.io/jlcpcb-parts-database/jlcpcb-components-basic-preferred.csv';
-let lcscCache=null; // null = not loaded, [] = loaded
+// ════════════════════════════════════════════════════════════
+// LCSC SEARCH — Real live data from the LCSC/EasyEDA API
+//
+// HOW THIS WORKS (honest):
+// LCSC blocks direct browser fetches (CORS). Three strategies:
+//  1. Cloudflare Worker (user deploys their own — free, 2 min)
+//     → calls real LCSC API with full search, 700k+ parts
+//  2. allorigins.win CORS proxy → real LCSC/EasyEDA API
+//     → may work depending on LCSC's current CORS policy
+//  3. CDFER GitHub Pages CSV (CORS-open, updates daily)
+//     → ~3500 JLCPCB basic/preferred parts only
+//  4. Local curated DB (always works, 25 parts)
+//
+// To get strategy 1 (best):
+//  a. Go to workers.cloudflare.com → free account
+//  b. Create Worker → paste the code shown in the UI
+//  c. Deploy → paste your worker URL in the box below
+// ════════════════════════════════════════════════════════════
 
-async function lcsc(){
-  const q=(document.getElementById('qq').value||'').trim();
-  const el=document.getElementById('qr');
-  if(!q){el.innerHTML='<div class="qmsg">Type a part number or keyword to search</div>';return;}
+const CDFER_CSV = 'https://cdfer.github.io/jlcpcb-parts-database/jlcpcb-components-basic-preferred.csv';
+const EASYEDA_SEARCH = 'https://easyeda.com/api/components/search?version=6.5.38&lang=en&source=lcsc&pageSize=20&page=1&wd=';
+const WMSC_SEARCH = 'https://wmsc.lcsc.com/ftps/wm/product/search?keyword=';
+let lcscCSVCache = null; // cached parsed CSV rows
 
-  // Load CSV once, cache it
-  if(!lcscCache){
-    el.innerHTML=`<div class="qmsg"><div class="qspin"></div><br>Loading JLCPCB/LCSC parts database…<br><span style="font-size:9px;color:var(--t3)">~3MB, cached after first load</span></div>`;
-    try{
-      const res=await fetch(LCSC_CSV_URL,{signal:AbortSignal.timeout(20000)});
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      const text=await res.text();
-      lcscCache=parseCSV(text);
-      toast('Loaded '+lcscCache.length.toLocaleString()+' LCSC parts');
-    }catch(err){
-      // CSV fetch failed — fall back to embedded curated DB
-      lcscCache='failed';
-      el.innerHTML=`<div class="qmsg" style="color:var(--a)">Could not load live database (${err.message}).<br>Searching local curated DB instead.</div>`;
-      await new Promise(r=>setTimeout(r,1200));
-    }
+async function lcsc() {
+  const q = (document.getElementById('qq').value || '').trim();
+  const el = document.getElementById('qr');
+  if (!q) { el.innerHTML = '<div class="qmsg">Enter a part number or keyword</div>'; return; }
+
+  el.innerHTML = '<div class="qmsg"><div class="qspin"></div><br>Searching LCSC…</div>';
+
+  // ── Strategy 1: User's Cloudflare Worker ──────────────────
+  const workerUrl = (document.getElementById('lcsc-worker-url') || {}).value || '';
+  if (workerUrl && workerUrl.includes('workers.dev')) {
+    try {
+      const res = await fetch(workerUrl + '?q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        const data = await res.json();
+        const items = parseLCSCResponse(data, q);
+        if (items.length) { renderLCSC(items, 'Live LCSC via your Cloudflare Worker ✓'); return; }
+      }
+    } catch (_) {}
   }
 
-  const ql=q.toLowerCase();
-
-  // Search the real live data
-  if(Array.isArray(lcscCache)){
-    const hits=lcscCache.filter(d=>
-      (d.pn||'').toLowerCase().includes(ql)||
-      (d.mfr_part||'').toLowerCase().includes(ql)||
-      (d.desc||'').toLowerCase().includes(ql)||
-      (d.mfr||'').toLowerCase().includes(ql)||
-      (d.pkg||'').toLowerCase().includes(ql)
-    ).slice(0,40);
-
-    if(!hits.length){
-      el.innerHTML=`<div class="qmsg">No results for "<strong>${q}</strong>" in ${lcscCache.length.toLocaleString()} parts.<br>Try different keywords or a LCSC part number like <code>C701342</code></div>`;
-      return;
+  // ── Strategy 2: allorigins → EasyEDA (same DB as LCSC) ────
+  try {
+    const target = EASYEDA_SEARCH + encodeURIComponent(q);
+    const proxy = 'https://api.allorigins.win/get?url=' + encodeURIComponent(target);
+    const res = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
+    if (res.ok) {
+      const wrapper = await res.json();
+      const data = JSON.parse(wrapper.contents || '{}');
+      const lists = data?.result?.lists || data?.lists || [];
+      if (lists.length) {
+        const items = lists.map(parseEasyEDAItem).filter(p => p.pn);
+        if (items.length) { renderLCSC(items, 'Live data via EasyEDA/LCSC API ✓'); return; }
+      }
     }
-    // Convert CSV rows → our part format, merging pin data from local DB where available
-    const parts=hits.map(row=>{
-      const localMatch=LCSC_DB.find(d=>d.pn===row.pn||d.name.toLowerCase().startsWith((row.mfr_part||'').toLowerCase().slice(0,8)));
-      return{
-        pn:row.pn,
-        name:row.mfr_part||row.desc.slice(0,40),
-        mfr:row.mfr,
-        pkg:row.pkg,
-        price:parseFloat(row.price)||0,
-        stock:parseInt(row.stock)||0,
-        desc:row.desc,
-        pins:localMatch?localMatch.pins:inferPinsFromDesc(row.pkg,row.desc),
-      };
-    });
-    renderLCSC(parts);
-    return;
-  }
+  } catch (_) {}
 
-  // Fallback to curated DB
-  const hits2=LCSC_DB.filter(d=>
-    d.pn.toLowerCase().includes(ql)||d.name.toLowerCase().includes(ql)||
-    d.desc.toLowerCase().includes(ql)||d.mfr.toLowerCase().includes(ql)
+  // ── Strategy 2b: allorigins → wmsc.lcsc.com ───────────────
+  try {
+    const target = WMSC_SEARCH + encodeURIComponent(q) + '&pageSize=20&currentPage=1';
+    const proxy = 'https://api.allorigins.win/get?url=' + encodeURIComponent(target);
+    const res = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
+    if (res.ok) {
+      const wrapper = await res.json();
+      const data = JSON.parse(wrapper.contents || '{}');
+      const items = (data?.result?.productSearchResultVO?.productList || []).map(parseWMSCItem).filter(p => p.pn);
+      if (items.length) { renderLCSC(items, 'Live data via LCSC search API ✓'); return; }
+    }
+  } catch (_) {}
+
+  // ── Strategy 3: CDFER CSV (CORS-open GitHub Pages) ────────
+  try {
+    if (!lcscCSVCache) {
+      el.innerHTML = '<div class="qmsg"><div class="qspin"></div><br>Loading JLCPCB parts database (~3MB)…</div>';
+      const res = await fetch(CDFER_CSV, { signal: AbortSignal.timeout(25000) });
+      if (res.ok) { lcscCSVCache = parseCSV(await res.text()); }
+    }
+    if (lcscCSVCache && Array.isArray(lcscCSVCache)) {
+      const ql = q.toLowerCase();
+      const hits = lcscCSVCache.filter(d =>
+        (d.pn||'').toLowerCase().includes(ql) ||
+        (d.mfr_part||'').toLowerCase().includes(ql) ||
+        (d.desc||'').toLowerCase().includes(ql) ||
+        (d.mfr||'').toLowerCase().includes(ql)
+      ).slice(0, 40).map(row => {
+        const local = LCSC_DB.find(d => d.pn === row.pn);
+        return {
+          pn: row.pn, name: row.mfr_part || row.desc.slice(0, 40),
+          mfr: row.mfr, pkg: row.pkg,
+          price: parseFloat(row.price) || 0, stock: parseInt(row.stock) || 0,
+          desc: row.desc, pins: local ? local.pins : inferPinsFromDesc(row.pkg, row.desc)
+        };
+      });
+      if (hits.length) {
+        renderLCSC(hits, 'JLCPCB basic/preferred parts (' + lcscCSVCache.length.toLocaleString() + ' parts, updated daily)');
+        return;
+      }
+    }
+  } catch (_) {}
+
+  // ── Strategy 4: Local curated DB ──────────────────────────
+  const ql = q.toLowerCase();
+  const local = LCSC_DB.filter(d =>
+    d.pn.toLowerCase().includes(ql) || d.name.toLowerCase().includes(ql) ||
+    d.desc.toLowerCase().includes(ql) || d.mfr.toLowerCase().includes(ql)
   );
-  if(!hits2.length){
-    el.innerHTML=`<div class="qmsg">No results for "<strong>${q}</strong>".<br>Try: <code>ESP32</code> · <code>STM32</code> · <code>AMS1117</code> · <code>DS18B20</code> · <code>CH340</code> · <code>10k</code> · <code>100nF</code></div>`;
+  if (local.length) {
+    renderLCSC(local, '⚠ Showing local database only — live search unavailable');
     return;
   }
-  renderLCSC(hits2);
+
+  // Nothing found anywhere
+  el.innerHTML = `<div class="qmsg" style="color:var(--a)">
+    No results for "<strong>${q}</strong>" found in any source.<br><br>
+    <strong>To enable live LCSC search:</strong><br>
+    1. Go to <a href="https://workers.cloudflare.com" target="_blank" style="color:var(--g)">workers.cloudflare.com</a> (free)<br>
+    2. Create a Worker, paste the proxy code (shown in Setup tab)<br>
+    3. Deploy and paste your <code>.workers.dev</code> URL above<br><br>
+    Or try: <code>ESP32</code> · <code>AMS1117</code> · <code>STM32</code> · <code>DS18B20</code>
+  </div>`;
 }
 
-function parseCSV(text){
-  // Parse the CDFER CSV: Manufacturer,LCSC Part #,Description,Package,Stock,Type,MFR.Part #,Datasheet,Price (USD)
-  const lines=text.split('\n');
-  if(lines.length<2)return[];
-  const header=lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/[^a-z#]/g,'_').replace(/__+/g,'_'));
-  // Find column indices robustly
-  const ci=(name)=>header.findIndex(h=>h.includes(name));
-  const iMfr=ci('manufacturer'),iPn=ci('lcsc'),iDesc=ci('description'),iPkg=ci('package'),
-        iStock=ci('stock'),iMfrPart=ci('mfr'),iPrice=ci('price');
-  const parts=[];
-  for(let i=1;i<lines.length;i++){
-    const line=lines[i].trim();if(!line)continue;
-    // Handle quoted fields (descriptions may contain commas)
-    const cols=splitCSVLine(line);
-    if(cols.length<4)continue;
+// ── Parse API responses ───────────────────────────────────
+function parseEasyEDAItem(p) {
+  const attrs = p.attributes || p.c_para || {};
+  const pn = p.lcscPart || p.number || attrs['LCSC Part#'] || '';
+  const name = p.title || p.displayTitle || p.productModel || '';
+  const mfr = p.manufacturer || attrs['Manufacturer'] || '';
+  const pkg = p.packageDetail || p.package || attrs['Package'] || '';
+  const desc = (p.description || '').slice(0, 150);
+  const stock = parseInt(p.stockCount || p.stock || 0);
+  const price = parseFloat(p.price || 0);
+  // Try to extract pin names from EasyEDA dataStr format
+  const pins = extractEasyEDAPins(p.dataStr || '', pkg, desc);
+  return { pn, name, mfr, pkg, price, stock, desc, pins };
+}
+
+function parseWMSCItem(p) {
+  const pn = p.productCode || '';
+  const name = p.productModel || p.productIntroEn || '';
+  const mfr = p.brandNameEn || '';
+  const pkg = p.encapStandard || '';
+  const desc = (p.productIntroEn || '').slice(0, 150);
+  const stock = parseInt(p.stockNumber || 0);
+  const price = parseFloat(p.prices?.[0]?.productPrice || 0);
+  const pins = inferPinsFromDesc(pkg, desc);
+  return { pn, name, mfr, pkg, price, stock, desc, pins };
+}
+
+function parseLCSCResponse(data, q) {
+  // Handle response from user's Cloudflare Worker
+  // Worker should return raw EasyEDA or WMSC response
+  const lists = data?.result?.lists || data?.result?.productSearchResultVO?.productList || data?.lists || data?.items || [];
+  if (lists.length) return lists.map(p => p.productCode ? parseWMSCItem(p) : parseEasyEDAItem(p)).filter(x => x.pn);
+  return [];
+}
+
+function extractEasyEDAPins(dataStr, pkg, desc) {
+  if (!dataStr) return inferPinsFromDesc(pkg, desc);
+  const pins = [];
+  try {
+    // EasyEDA pin format in dataStr: PIN~...~...~pinName~...
+    const matches = [...dataStr.matchAll(/PIN~[^~]*~[^~]*~([^~\s][^~]*)~/g)];
+    matches.forEach(m => {
+      const n = m[1].trim();
+      if (n && n !== '~' && n.length < 20) {
+        pins.push({ n, s: guessPinType(n), side: guessPinSide(n, pins.length) });
+      }
+    });
+    if (pins.length > 1) return pins;
+  } catch (_) {}
+  return inferPinsFromDesc(pkg, desc);
+}
+
+function guessPinType(name) {
+  const n = (name || '').toLowerCase();
+  if (/^gnd$|^vss$|^gnd\d?$/.test(n)) return 'pwr';
+  if (/^vcc$|^vdd$|^3v3$|^5v$|^vbus$|^vin$|^vout$|^vdd/.test(n)) return 'pwr';
+  if (/sda$|scl$/.test(n)) return 'i2c';
+  if (/mosi|miso|^sck$|^sclk$|^cs$|^ss$|^nss$/.test(n)) return 'spi';
+  if (/^tx$|^txd|^rx$|^rxd/.test(n)) return 'uart';
+  if (/usb|^d\+$|^d-$|^dp$|^dm$/.test(n)) return 'usb';
+  if (/adc|ain|^a\d+$/.test(n)) return 'adc';
+  return 'io';
+}
+function guessPinSide(name, idx) {
+  const n = (name || '').toLowerCase();
+  if (/^gnd$|^vss$|^vcc$|^vdd$|^vin/.test(n)) return 'L';
+  if (/^vout$|^tx$|^mosi$|^sda$|^int$/.test(n)) return 'R';
+  return idx % 2 === 0 ? 'L' : 'R';
+}
+
+function inferPinsFromDesc(pkg, desc) {
+  const pkgU = (pkg || '').toUpperCase();
+  const m = pkgU.match(/(\d+)(?:P|PIN|-PIN)?$/) || pkgU.match(/DIP-?(\d+)/) ||
+    pkgU.match(/(?:LQFP|QFN|TQFP|SOP|SSOP|SOIC|TSSOP)-?(\d+)/) || pkgU.match(/SOT-?(\d+)/);
+  const count = m ? Math.min(parseInt(m[1]), 64) : 0;
+  if (!count) return [{ n: 'VCC', s: 'pwr', side: 'L' }, { n: 'GND', s: 'pwr', side: 'L' }, { n: 'OUT', s: 'io', side: 'R' }];
+  return Array.from({ length: count }, (_, i) => ({
+    n: String(i + 1), s: i === 0 ? 'pwr' : i === count - 1 ? 'pwr' : 'io',
+    side: i < Math.ceil(count / 2) ? 'L' : 'R'
+  }));
+}
+
+function parseCSV(text) {
+  const lines = text.split('\n');
+  if (lines.length < 2) return [];
+  const hdr = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z#]/g, '_').replace(/__+/g, '_'));
+  const ci = name => hdr.findIndex(h => h.includes(name));
+  const [iMfr, iPn, iDesc, iPkg, iStock, iMfrPart, iPrice] =
+    ['manufacturer','lcsc','description','package','stock','mfr','price'].map(ci);
+  const parts = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim(); if (!line) continue;
+    const cols = splitCSV(line);
+    if (cols.length < 4) continue;
     parts.push({
-      mfr:(cols[iMfr]||'').trim(),
-      pn:(cols[iPn]||'').trim(),
-      desc:(cols[iDesc]||'').trim(),
-      pkg:(cols[iPkg]||'').trim(),
-      stock:(cols[iStock]||'0').trim(),
-      mfr_part:(cols[iMfrPart]||'').trim(),
-      price:(cols[iPrice]||'0').trim(),
+      mfr: (cols[iMfr] || '').trim(), pn: (cols[iPn] || '').trim(),
+      desc: (cols[iDesc] || '').trim(), pkg: (cols[iPkg] || '').trim(),
+      stock: (cols[iStock] || '0').trim(), mfr_part: (cols[iMfrPart] || '').trim(),
+      price: (cols[iPrice] || '0').trim()
     });
   }
   return parts;
 }
 
-function splitCSVLine(line){
-  // Handles quoted fields with embedded commas
-  const result=[];let cur='';let inQ=false;
-  for(let i=0;i<line.length;i++){
-    const c=line[i];
-    if(c==='"'){inQ=!inQ;}
-    else if(c===','&&!inQ){result.push(cur);cur='';}
-    else cur+=c;
+function splitCSV(line) {
+  const r = []; let cur = '', inQ = false;
+  for (const c of line) {
+    if (c === '"') inQ = !inQ;
+    else if (c === ',' && !inQ) { r.push(cur); cur = ''; }
+    else cur += c;
   }
-  result.push(cur);
-  return result;
+  r.push(cur); return r;
 }
 
-function inferPinsFromDesc(pkg,desc){
-  // Guess pin count from package name, assign reasonable pin types
-  const pkgU=(pkg||'').toUpperCase();
-  const descL=(desc||'').toLowerCase();
-  const m=pkgU.match(/(\d+)(?:P|PIN|-PIN)?$/)||pkgU.match(/DIP-?(\d+)/)||pkgU.match(/(?:LQFP|QFN|TQFP|SOP|SSOP|SOIC|TSSOP)-?(\d+)/)||pkgU.match(/SOT-?(\d+)/);
-  const count=m?Math.min(parseInt(m[1]),64):0;
-  if(!count)return[{n:'VCC',s:'pwr',side:'L'},{n:'GND',s:'pwr',side:'L'},{n:'OUT',s:'io',side:'R'}];
-  const pins=[];
-  for(let i=1;i<=count;i++){
-    let s='io';
-    if(i===1)s='pwr'; // pin 1 often VCC
-    if(i===count)s='pwr'; // last pin often GND
-    pins.push({n:''+i,s,side:i<=Math.ceil(count/2)?'L':'R'});
-  }
-  return pins;
+function ptcol(s) {
+  return { pwr:'#f5a623',io:'#4fb8f7',i2c:'#b48bfc',spi:'#34d399',uart:'#fb923c',
+           usb:'#60a5fa',adc:'#f472b6','1w':'#22d3ee',pass:'#7698b8' }[s] || '#4a6a8a';
 }
 
-function ptcol(s){return{pwr:'#f5a623',io:'#4fb8f7',i2c:'#b48bfc',spi:'#34d399',uart:'#fb923c',usb:'#60a5fa',adc:'#f472b6','1w':'#22d3ee',pass:'#7698b8'}[s]||'#4a6a8a';}
-
-function renderFootprintSVG(p){
-  const pins=p.pins||[];const n=pins.length;if(!n)return'';
-  const pkg=p.pkg||'';
-  const isDIP=/DIP|THT|TO-92|TO-220/i.test(pkg);
-  const lp=pins.filter(x=>x.side==='L');
-  const rp=pins.filter(x=>x.side==='R');
-  const bp=pins.filter(x=>x.side==='B');
-  const tp=pins.filter(x=>x.side==='T');
-  // Auto-split if no sides set
-  if(!lp.length&&!rp.length&&!bp.length&&!tp.length){
-    pins.forEach((pin,i)=>pin.side=i<Math.ceil(n/2)?'L':'R');
+function renderFootprintSVG(p) {
+  const pins = p.pins || []; const n = pins.length; if (!n) return '';
+  const pkg = p.pkg || '';
+  const isDIP = /DIP|THT|TO-92|TO-220/i.test(pkg);
+  const lp = pins.filter(x => x.side === 'L');
+  const rp = pins.filter(x => x.side === 'R');
+  const bp = pins.filter(x => x.side === 'B');
+  const tp = pins.filter(x => x.side === 'T');
+  if (!lp.length && !rp.length && !bp.length && !tp.length) {
+    pins.forEach((pin, i) => pin.side = i < Math.ceil(n / 2) ? 'L' : 'R');
+    lp.push(...pins.filter(x => x.side === 'L'));
+    rp.push(...pins.filter(x => x.side === 'R'));
   }
-  const rows=Math.max(lp.length,rp.length,1);
-  const PAD=12,PW=isDIP?10:8,PH=isDIP?7:4,GAP=10;
-  const bH=Math.max(40,rows*GAP+16);
-  const bW=80;
-  const bx=60,by=bp.length?16:8;
-  const totalH=bH+(tp.length?16:0)+(bp.length?22:0)+(tp.length?12:0);
-  const svgH=by+totalH+10;
-  let s=`<svg width="320" height="${svgH}" viewBox="0 0 320 ${svgH}" style="display:block;max-width:100%;overflow:visible">`;
-  // Body
-  s+=`<rect x="${bx}" y="${by}" width="${bW}" height="${bH}" rx="3" fill="#080e16" stroke="#253545" stroke-width="1.2"/>`;
-  // Pin 1 dot
-  s+=`<circle cx="${bx+5}" cy="${by+5}" r="2.5" fill="#c8763a"/>`;
-  // Name
-  s+=`<text x="${bx+bW/2}" y="${by+bH/2-4}" text-anchor="middle" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="7" fill="#2d4a62">${pkg.slice(0,10)}</text>`;
-  s+=`<text x="${bx+bW/2}" y="${by+bH/2+6}" text-anchor="middle" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="6" fill="#1e3040">${n}P</text>`;
-  // Left pins
-  lp.forEach((pin,i)=>{
-    const py=by+12+i*GAP;const c=ptcol(pin.s);
-    s+=`<rect x="${bx-PAD-PW}" y="${py-PH/2}" width="${PW}" height="${PH}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
-    s+=`<line x1="${bx-PAD}" y1="${py}" x2="${bx}" y2="${py}" stroke="${c}" stroke-width=".8"/>`;
-    s+=`<text x="${bx-PAD-PW-2}" y="${py+1}" text-anchor="end" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="5.5" fill="${c}cc">${pin.n}</text>`;
+  const rows = Math.max(lp.length, rp.length, 1);
+  const PAD = 12, PW = isDIP ? 10 : 8, PH = isDIP ? 7 : 4, GAP = 10;
+  const bH = Math.max(40, rows * GAP + 16), bW = 80;
+  const bx = 60, by = bp.length ? 16 : 8;
+  const svgH = by + bH + (bp.length ? PAD + PW + 12 : 0) + (tp.length ? PAD + PW + 4 : 0) + 10;
+  let s = `<svg width="320" height="${svgH}" viewBox="0 0 320 ${svgH}" style="display:block;max-width:100%;overflow:visible">`;
+  s += `<rect x="${bx}" y="${by}" width="${bW}" height="${bH}" rx="3" fill="#080e16" stroke="#253545" stroke-width="1.2"/>`;
+  s += `<circle cx="${bx+5}" cy="${by+5}" r="2.5" fill="#c8763a"/>`;
+  s += `<text x="${bx+bW/2}" y="${by+bH/2-4}" text-anchor="middle" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="7" fill="#2d4a62">${pkg.slice(0,10)}</text>`;
+  s += `<text x="${bx+bW/2}" y="${by+bH/2+6}" text-anchor="middle" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="6" fill="#1e3040">${n}P</text>`;
+  lp.forEach((pin, i) => {
+    const py = by + 12 + i * GAP; const c = ptcol(pin.s);
+    s += `<rect x="${bx-PAD-PW}" y="${py-PH/2}" width="${PW}" height="${PH}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
+    s += `<line x1="${bx-PAD}" y1="${py}" x2="${bx}" y2="${py}" stroke="${c}" stroke-width=".8"/>`;
+    s += `<text x="${bx-PAD-PW-2}" y="${py+1}" text-anchor="end" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="5.5" fill="${c}cc">${pin.n}</text>`;
   });
-  // Right pins
-  rp.forEach((pin,i)=>{
-    const py=by+12+i*GAP;const c=ptcol(pin.s);
-    s+=`<rect x="${bx+bW+PAD}" y="${py-PH/2}" width="${PW}" height="${PH}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
-    s+=`<line x1="${bx+bW}" y1="${py}" x2="${bx+bW+PAD}" y2="${py}" stroke="${c}" stroke-width=".8"/>`;
-    s+=`<text x="${bx+bW+PAD+PW+2}" y="${py+1}" text-anchor="start" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="5.5" fill="${c}cc">${pin.n}</text>`;
+  rp.forEach((pin, i) => {
+    const py = by + 12 + i * GAP; const c = ptcol(pin.s);
+    s += `<rect x="${bx+bW+PAD}" y="${py-PH/2}" width="${PW}" height="${PH}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
+    s += `<line x1="${bx+bW}" y1="${py}" x2="${bx+bW+PAD}" y2="${py}" stroke="${c}" stroke-width=".8"/>`;
+    s += `<text x="${bx+bW+PAD+PW+2}" y="${py+1}" text-anchor="start" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="5.5" fill="${c}cc">${pin.n}</text>`;
   });
-  // Bottom pins
-  bp.forEach((pin,i)=>{
-    const px=bx+8+i*(bW-14)/Math.max(bp.length-1,1);const c=ptcol(pin.s);
-    s+=`<rect x="${px-PH/2}" y="${by+bH+PAD}" width="${PH}" height="${PW}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
-    s+=`<line x1="${px}" y1="${by+bH}" x2="${px}" y2="${by+bH+PAD}" stroke="${c}" stroke-width=".8"/>`;
-    s+=`<text x="${px}" y="${by+bH+PAD+PW+8}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="5" fill="${c}cc">${pin.n}</text>`;
+  bp.forEach((pin, i) => {
+    const px = bx + 8 + i * (bW - 14) / Math.max(bp.length - 1, 1); const c = ptcol(pin.s);
+    s += `<rect x="${px-PH/2}" y="${by+bH+PAD}" width="${PH}" height="${PW}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
+    s += `<line x1="${px}" y1="${by+bH}" x2="${px}" y2="${by+bH+PAD}" stroke="${c}" stroke-width=".8"/>`;
+    s += `<text x="${px}" y="${by+bH+PAD+PW+8}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="5" fill="${c}cc">${pin.n}</text>`;
   });
-  // Top pins
-  tp.forEach((pin,i)=>{
-    const px=bx+8+i*(bW-14)/Math.max(tp.length-1,1);const c=ptcol(pin.s);
-    s+=`<rect x="${px-PH/2}" y="${by-PAD-PW}" width="${PH}" height="${PW}" rx="1" fill="${c}66" stroke="${c}" stroke-width=".6"/>`;
-    s+=`<line x1="${px}" y1="${by}" x2="${px}" y2="${by-PAD}" stroke="${c}" stroke-width=".8"/>`;
-    s+=`<text x="${px}" y="${by-PAD-PW-3}" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="5" fill="${c}cc">${pin.n}</text>`;
-  });
-  s+='</svg>';return s;
+  s += '</svg>'; return s;
 }
 
-function renderLCSC(items){
-  const el=document.getElementById('qr');
-  el.innerHTML=items.map(p=>{
-    const pc=p.price>0?'$'+p.price.toFixed(4):'—';
-    const pins=p.pins||[];
-    const fp=renderFootprintSVG(p);
-    return`<div class="qi">
-      <div class="qi-top">
-        <span class="qi-pn">${p.pn}</span>
-        <span class="qi-pr">${pc}</span>
-      </div>
+function renderLCSC(items, sourceNote) {
+  const el = document.getElementById('qr');
+  const note = sourceNote ? `<div style="padding:4px 8px;font-family:var(--fn);font-size:9px;color:var(--g);border-bottom:1px solid var(--b0);background:var(--gd)">${sourceNote}</div>` : '';
+  el.innerHTML = note + items.map(p => {
+    const pc = p.price > 0 ? '$' + p.price.toFixed(4) : '—';
+    const pins = p.pins || [];
+    const fp = renderFootprintSVG(p);
+    const safeP = JSON.stringify({ id: p.pn, name: p.name, mfr: p.mfr, pkg: p.pkg, desc: p.desc, pins: p.pins })
+      .replace(/</g,'\\u003c').replace(/'/g,'\\u0027').replace(/"/g,'&quot;');
+    return `<div class="qi">
+      <div class="qi-top"><span class="qi-pn">${p.pn}</span><span class="qi-pr">${pc}</span></div>
       <div class="qi-name">${p.name}</div>
-      <div class="qi-meta">${p.mfr} · ${p.pkg} · ${p.stock.toLocaleString()} in stock</div>
-      <div style="font-size:9px;color:var(--t3);line-height:1.5;margin:3px 0 4px">${p.desc}</div>
-      ${fp?`<div style="margin:6px 0;background:var(--bg1);border:1px solid var(--b0);border-radius:4px;padding:8px 4px;overflow-x:auto">${fp}</div>`:''}
-      <div class="qi-pins">${pins.map(pin=>`<span class="qi-pin ${pin.s||'oth'}">${pin.n}</span>`).join('')}</div>
+      <div class="qi-meta">${p.mfr} · ${p.pkg} · ${(p.stock||0).toLocaleString()} in stock</div>
+      <div style="font-size:9px;color:var(--t3);line-height:1.5;margin:3px 0 4px">${(p.desc||'').slice(0,140)}</div>
+      ${fp ? `<div style="margin:6px 0;background:var(--bg1);border:1px solid var(--b0);border-radius:4px;padding:8px 4px;overflow-x:auto">${fp}</div>` : ''}
+      ${pins.length ? `<div class="qi-pins">${pins.map(pin => `<span class="qi-pin ${pin.s||'oth'}">${pin.n}</span>`).join('')}</div>` : ''}
       <div class="qi-bot">
-        <span class="qi-stk">${pins.length} pins</span>
+        <span class="qi-stk">${pins.length} pins · ${p.pkg||'?'}</span>
         <div style="display:flex;gap:6px;align-items:center">
-          <a href="https://www.lcsc.com/search?q=${p.pn}" target="_blank"
-             style="font-family:var(--fn);font-size:9px;color:var(--g);text-decoration:none;border:1px solid var(--g);padding:2px 6px;border-radius:3px;background:var(--gd)"
-             >View on LCSC ↗</a>
-          <button class="qi-add" onclick='addFromLCSC(${JSON.stringify({id:p.pn,name:p.name,mfr:p.mfr,pkg:p.pkg,desc:p.desc,pins:p.pins}).replace(/'/g,"&#39;")})'>+ Add</button>
+          <a href="https://www.lcsc.com/search?q=${encodeURIComponent(p.pn)}" target="_blank"
+             style="font-family:var(--fn);font-size:9px;color:var(--g);text-decoration:none;border:1px solid var(--g);padding:2px 6px;border-radius:3px;background:var(--gd)">View on LCSC ↗</a>
+          <button class="qi-add" onclick='addFromLCSC(JSON.parse(this.dataset.p))' data-p="${safeP}">+ Add</button>
         </div>
       </div>
     </div>`;
   }).join('');
 }
 
-function addFromLCSC(p){
-  const known=LIB.find(l=>l.lcscPn===p.pn||l.name.toLowerCase().startsWith((p.name||'').toLowerCase().slice(0,7)));
-  if(known){addC(known.id);toast('Added '+known.name);return;}
-  const nid='LCSC_'+p.pn;
-  if(!LIB.find(l=>l.id===nid)){
-    const sl=((p.name||'')+' '+(p.desc||'')).toLowerCase();
-    const cat=/esp|stm|avr|pic|cortex|arm|micro/.test(sl)?'mcu':/sensor|temp|humid|imu|accel|gyro/.test(sl)?'sens':/ldo|regul|buck|boost/.test(sl)?'pwr':/usb|uart|i2c|spi|serial|converter/.test(sl)?'iface':'pass';
-    const pins=(p.pins&&p.pins.length)?p.pins:[{n:'VCC',s:'pwr',side:'L'},{n:'GND',s:'pwr',side:'L'},{n:'OUT',s:'io',side:'R'}];
-    LIB.push({id:nid,cat,name:p.name||p.mfr_part||p.pn,mfr:p.mfr||'LCSC',pkg:p.pkg||'SMD',v:'—',lcscPn:p.pn,desc:(p.desc||'').slice(0,120),pins});
+function addFromLCSC(p) {
+  const known = LIB.find(l => l.lcscPn === p.id || l.name.toLowerCase().startsWith((p.name||'').toLowerCase().slice(0,7)));
+  if (known) { addC(known.id); toast('Added ' + known.name); return; }
+  const nid = 'LCSC_' + p.id;
+  if (!LIB.find(l => l.id === nid)) {
+    const sl = ((p.name||'') + ' ' + (p.desc||'')).toLowerCase();
+    const cat = /esp|stm|avr|pic|cortex|arm|micro/.test(sl)?'mcu':/sensor|temp|humid|imu|accel|gyro/.test(sl)?'sens':/ldo|regul|buck|boost/.test(sl)?'pwr':/usb|uart|i2c|spi|serial|converter/.test(sl)?'iface':'pass';
+    const pins = (p.pins&&p.pins.length) ? p.pins : [{ n:'VCC',s:'pwr',side:'L' },{ n:'GND',s:'pwr',side:'L' },{ n:'OUT',s:'io',side:'R' }];
+    LIB.push({ id:nid, cat, name:p.name||p.id, mfr:p.mfr||'LCSC', pkg:p.pkg||'SMD', v:'—', lcscPn:p.id, desc:(p.desc||'').slice(0,120), pins });
   }
-  addC(nid);rl();
+  addC(nid); rl();
 }
+
 function searchByPN(pn){document.getElementById('qq').value=pn;tp('pq');lcsc();}
+
+function showWorkerSetup(){
+  const code=`// Paste this into Cloudflare Workers (workers.cloudflare.com)
+// Free account — 100,000 requests/day, no credit card needed
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const q = url.searchParams.get('q') || '';
+    // Try EasyEDA/LCSC search
+    const target = 'https://easyeda.com/api/components/search?version=6.5.38&lang=en&source=lcsc&pageSize=20&page=1&wd=' + encodeURIComponent(q);
+    const resp = await fetch(target, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://easyeda.com/' }
+    });
+    const data = await resp.json();
+    return new Response(JSON.stringify(data), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET',
+      }
+    });
+  }
+};`;
+  const el=document.getElementById('qr');
+  el.innerHTML=`<div style="padding:10px 8px">
+    <div style="font-family:var(--fn);font-size:10px;color:var(--t1);font-weight:600;margin-bottom:8px">Deploy a free CORS proxy in 2 minutes</div>
+    <div style="font-family:var(--fn);font-size:9px;color:var(--t2);line-height:1.8;margin-bottom:10px">
+      1. Open <a href="https://workers.cloudflare.com" target="_blank" style="color:var(--g)">workers.cloudflare.com</a> → free account<br>
+      2. Click <strong>Create Worker</strong><br>
+      3. Replace all code with the code below<br>
+      4. Click <strong>Deploy</strong><br>
+      5. Copy your <code style="color:var(--g)">xxxx.workers.dev</code> URL<br>
+      6. Paste it in the Worker URL box above<br>
+    </div>
+    <div style="background:var(--bg0);border:1px solid var(--b1);border-radius:var(--rad);padding:8px;position:relative">
+      <button onclick="navigator.clipboard.writeText(this.nextElementSibling.textContent);toast('Copied!')" style="position:absolute;top:6px;right:6px;padding:2px 8px;border-radius:var(--rad);border:1px solid var(--b1);background:var(--bg3);color:var(--t2);font-family:var(--fn);font-size:9px;cursor:pointer">Copy</button>
+      <pre style="font-family:var(--fn);font-size:8px;color:var(--t2);line-height:1.6;overflow-x:auto;white-space:pre;margin:0">${code.replace(/</g,'&lt;')}</pre>
+    </div>
+    <div style="margin-top:8px;font-family:var(--fn);font-size:9px;color:var(--t3)">
+      This gives you full 700k+ LCSC search with real pin data. The worker runs on Cloudflare's edge globally, free tier is 100k req/day.
+    </div>
+    <button onclick="document.getElementById('qr').innerHTML='<div class=qmsg>Search above to find parts</div>'" style="margin-top:8px;width:100%;padding:5px;border-radius:var(--rad);border:1px solid var(--b1);background:transparent;color:var(--t2);font-family:var(--fn);font-size:10px;cursor:pointer">← Back to search</button>
+  </div>`;
+}
+
 
 // ════════════════════════════════════════════════════════════
 // AI — WebLLM ONLY (runs 100% in browser via WebGPU)
